@@ -56,6 +56,14 @@ orca orchestration run-create --objective "<one sentence on what this plan does>
 
 The response carries `result.run.id` (shaped like `run_xxxxxxxx`). `run-create` binds the **current terminal** as that Run's coordinator, so later `task-create` calls don't need `--run`.
 
+**If you are not running inside an Orca terminal** (e.g. Claude Desktop or Cursor driving the
+DAG), `run-create` fails with `no_active_sender_terminal`. Create a blank Orca terminal to act
+as the coordinator and send from it:
+```bash
+orca terminal create --worktree active --title "DAG coordinator" --json   # note its handle
+orca orchestration run-create --objective "..." --from <coordinator_handle> --json
+```
+
 > One Run holds one DAG. Orca itself doesn't enforce this (a Run is just a namespace), but the viewer renders "one Run = one graph". To replan, open a new Run — **never** use `reset`.
 
 ### Step 1: create tasks one by one
@@ -137,7 +145,8 @@ orca orchestration worker-list --json | grep -E 'dispatchStatus|workerState'
 ```
 Only reclaim when every dispatch is `failed`/`completed`. If you created zombies anyway,
 clear them with `worker-abandon --dispatch <ctx_id>` (fences without claiming the process
-stopped, touches no files), then reset task statuses by hand.
+stopped, touches no files), then reset task statuses by hand. `worker-abandon` takes **no
+`--from`** (only `--dispatch`), unlike most coordinator mutations, so don't pass one.
 
 You and the user can keep adjusting the DAG in conversation, but **make graph edits while
 the graph is idle**, then let the user hit Run.
@@ -185,6 +194,10 @@ orca orchestration worker-start ... ; orca terminal send --terminal <term_handle
 orca terminal read --terminal <term_handle> --screen --json
 ```
 (`--wait-submit` requires `--text`; for a bare Enter use `--enter` alone.)
+
+**One Enter is sometimes not enough.** If the input box still shows `[Pasted Content]` after
+the nudge, the paste was collapsed and not sent; send `--enter` a second time. Confirm with
+`terminal read --screen` that the agent actually started working.
 
 With the nudge, the full supervised loop completes normally: the worker reads the TASK
 block, does the work, calls `orchestration check`, sends `worker_done` with its dispatch
@@ -250,6 +263,18 @@ the file an explicit scope boundary naming what must NOT change — otherwise Co
   checkpoint, not a failure. Only positive proof of exit (`exited` liveness, the worker's
   own observation, or a transcript whose final turn sent no `worker_done`) authorizes
   stop / abandon / retry.
+- **Never pipe `orchestration check --wait` through `head`** (or anything that closes the pipe
+  early). `head` exits after its line count and ends the wait before a worker reports. Run it
+  unpiped, or capture to a file and read that.
+- **`worker_done`'s `filesModified` under-reports.** Treat it as a hint, not the change set.
+  Before reviewing or accepting a node, run `git diff --stat` in the worker's worktree.
+- **Codex workers in Orca worktrees need `--dangerously-bypass-approvals-and-sandbox`.**
+  Without it Codex can only read files there and PowerShell is blocked. It is now set as
+  Orca's default Codex argument; check it is still there if a Codex node can't write. Orca
+  runs Codex from its own home (`%APPDATA%\orca\codex-runtime-home\home`), not `CODEX_HOME`,
+  so editing `AI\.codex\config.toml` does not affect it. The root cause of the read-only limit
+  is unconfirmed. The Codex sandbox also can't write to `%TEMP%`: put any output paths in a
+  spec inside the worktree.
 - **Same-file work must be serial.** Parallel workers in one worktree clobber each other.
   Group fixes by region (JS / markup / CSS) and chain them, telling each node what the
   previous one already did. Fan out only across genuinely separate files or worktrees.
