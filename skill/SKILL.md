@@ -18,12 +18,31 @@ Every planning result **must be written into Orca's orchestration state** (by ru
 ```bash
 orca status --json      # runtime.state should be "ready"; if not, ask the user to run `orca open` first
                         # runtime.appVersion must be >= 1.4.160 (the Run/Dispatch contract)
+
+orca skills get orchestration --json        # REQUIRED. See below.
 ```
+
+**Always load `orca skills get orchestration` before building a DAG.** This skill is a
+graph-building helper, not the execution authority. The orchestration guide is served by
+the `orca` binary itself (version-matched, cannot drift) and is the only place that
+documents what to do when execution goes wrong: `worker-start` receipts and their
+`failedStage` / `residualResources`, the layered liveness model, and the recovery rules.
+`orca skills get orchestration --references` lists seven reference docs; load
+`references/recovery-and-cleanup.md` the moment any dispatch misbehaves.
+
+The stub at `~/.claude/skills/orchestration/SKILL.md` is only a pointer. Reading it is not
+a substitute for running the command.
 
 ## Workflow (three phases, all in conversation)
 1. **Requirement clarification (PRD)**: align on the goal, MVP scope, and explicit non-goals with short questions — one key question at a time. If MVP is enough, plan only P0; don't over-design. Once agreed, write `docs/PRD.md`.
 2. **Technical design (TECH_SPEC)**: stack, data model (down to fields), module interfaces (pseudocode). Write `docs/TECH_SPEC.md`.
 3. **Decompose into a task DAG**: split the design into parallel/serial subtasks and create the tasks and dependencies with the commands below. **This step is the required output.**
+
+**For review/revise work on code that already exists** (page critique, bug-fix rounds,
+"here's what I don't like"), skip PRD/TECH_SPEC entirely — they are for greenfield builds.
+Phase 1 becomes "agree on the critique", phase 2 becomes "write the critique to a dated
+Markdown file with an explicit scope boundary", and phase 3 is the same. See the
+back-and-forth section below.
 
 ## Writing the DAG into Orca (the core)
 
@@ -75,6 +94,11 @@ Every subtask's `--spec` must be **self-contained and independently executable**
 - Use imperative sentences; avoid vague phrasing like "investigate" or "as appropriate".
 
 ## When human approval is needed
+
+> ⚠️ Read the gate warning in the viewer section below first. Gates are swept to
+> `"approved"` when the viewer binds as coordinator, so a gate created before execution
+> does not survive. Use `task-update --status blocked` for a pause that holds.
+
 At key points (e.g. "approve the design before execution"), create a decision gate. It blocks its task, and the viewer surfaces approve/reject buttons:
 ```bash
 orca orchestration gate-create \
@@ -99,12 +123,136 @@ In other words: **execution is the viewer's job, not yours.** Your responsibilit
 orca orchestration run-use --id <run_id> --json     # re-bind yourself as coordinator
 ```
 
-Reads are unaffected — `task-list --run <id>` / `gate-list --run <id>` always work. So **`run-use` to reclaim the binding before adjusting the DAG**, then let the user hit Run again.
+Reads are unaffected — `task-list --run <id>` / `gate-list --run <id>` always work.
 
-You and the user can **keep adjusting the DAG in conversation** (add/remove tasks, change deps, add gates) and the viewer reflects it live. **By default, do not run `orca orchestration dispatch` / `worker-start` yourself** — that's the viewer's loop — unless the user explicitly asks you to drive from the command line.
+🛑 **NEVER `run-use` while any dispatch is in flight.** Reclaiming the binding bumps the
+Run's `consumer_generation`, which **revokes the capability of every live worker** — they
+become zombies: `status: pending`, `capability_revoked_at` set, no heartbeat, holding their
+tasks hostage forever. The viewer then fails to recover them (`cannot move to ready while
+Dispatch ... is active`) and the whole graph deadlocks.
+
+Before any `run-use`, prove nothing is running:
+```bash
+orca orchestration worker-list --json | grep -E 'dispatchStatus|workerState'
+```
+Only reclaim when every dispatch is `failed`/`completed`. If you created zombies anyway,
+clear them with `worker-abandon --dispatch <ctx_id>` (fences without claiming the process
+stopped, touches no files), then reset task statuses by hand.
+
+You and the user can keep adjusting the DAG in conversation, but **make graph edits while
+the graph is idle**, then let the user hit Run.
+
+⚠️ **Decision gates are unreliable as a pause.** Observed twice on 1.4.217: the viewer
+resolves every `pending` gate to `"approved"` about one second after it binds as
+coordinator — before any work runs. A gate created pre-execution is therefore spent on the
+next Run click, and recreating it just gets it eaten again. To actually hold a node, set
+its status directly (`task-update --id <task> --status blocked`) and flip it when ready; a
+task status is not swept by the gate sweep. Better still, don't make a human pause
+load-bearing — make the node read-only so running it early is harmless.
+
+## 🔴 Known defect: dispatched prompts are pasted but never submitted
+
+**Orca 1.4.217 injects the task preamble into the worker agent and does not press Enter.**
+Diagnosed and proven on 2026-09-30. The orchestration stack is otherwise fine — Runs,
+DAGs, deps, capabilities, `worker_done`, auto-settlement all work. Only the submit
+keystroke is missing.
+
+Two faces of the same bug:
+
+| Launch mode | Symptom |
+|---|---|
+| **structured** (Orca's default for new agent tabs) | Silent infinite hang. `stage: dispatch_input`, `state: start_unknown`, `heartbeat: null`. No error, no output, task stuck forever. |
+| **TUI** (`--terminal <handle>`) | Prompt visibly sits unsent in the input box. `stage: turn_start_unobserved`. |
+
+**Do not diagnose this as your graph being wrong, as a harness problem, or as an auth
+problem.** It reproduces identically on both `claude` and `codex`. Do not relaunch — the
+orchestration guide is explicit that a non-zero `worker-start` must not be retried.
+
+**Working path today — dispatch into a visible TUI and nudge it:**
+```bash
+# 1. visible agent tab in the current worktree (this IS the "messaging window")
+orca terminal create --worktree active --title "Codex worker" --command codex --focus --json
+orca terminal wait --terminal <term_handle> --for tui-idle --timeout-ms 120000 --json
+
+# 2. dispatch into that exact terminal instead of letting Orca spawn a structured session
+orca orchestration worker-start --task <task_id> --terminal <term_handle> \
+  --worktree current --timeout-ms 120000 --json
+
+# 3. THE NUDGE — press Enter, because Orca didn't
+orca orchestration worker-start ... ; orca terminal send --terminal <term_handle> --enter --json
+
+# 4. watch / read it work
+orca terminal read --terminal <term_handle> --screen --json
+```
+(`--wait-submit` requires `--text`; for a bare Enter use `--enter` alone.)
+
+With the nudge, the full supervised loop completes normally: the worker reads the TASK
+block, does the work, calls `orchestration check`, sends `worker_done` with its dispatch
+capability, and the task auto-settles to `completed`. Verified end to end in 24s.
+
+Because of this defect, **the viewer's "▶ Run with Orca" cannot be trusted to start
+work.** After the user fires it, verify a turn actually began rather than assuming:
+```bash
+orca orchestration worker-list --json | grep -E 'workerState|stage'
+```
+`start_unknown` at `dispatch_input` means nothing is running. Say so immediately instead
+of waiting.
+
+## Back-and-forth between Claude and Codex (review/revise rounds)
+
+For "have Codex fix it and toss it back to me", the shape is **bounded rounds**, because a
+DAG is acyclic and cannot express a loop. Do not try to encode a cycle.
+
+**Round pattern** — one implement node and one review node per round, chained:
+```
+spec/feedback (Claude, in chat)
+   └─> R1 implement (codex)  ─> R1 review (Claude)
+          └─> R2 implement (codex)  ─> R2 review (Claude)
+```
+Two rounds is usually right. Create R2's nodes up front; if R1 passes review, mark R2
+`completed` with a result saying "not needed, R1 accepted" rather than deleting them
+(tasks cannot be deleted).
+
+**Keep Codex's context across rounds by reusing its terminal.** This is what makes it feel
+like a conversation instead of a cold restart:
+```bash
+orca orchestration worker-start --task <round2_task> --terminal <same_codex_term> --json
+```
+The orchestration guide calls this reuse-after-settlement; choose the terminal's next owner
+*before* acking the `worker_done` delivery, and `worker-retain` it if the user wants the tab
+to stay open.
+
+**Claude's review nodes belong in conversation, not in a worker.** Running "Claude reviews
+this" as a background agent when Claude is already in the chat is pure indirection, and it
+costs the user the ability to react. Do the review in chat, then
+`task-update --id <review_task> --status completed --result '{"summary":"<verdict>"}'`.
+
+**Mid-task questions genuinely go both ways.** A dispatched worker blocks on the `ask`
+command from its injected preamble; the coordinator answers with
+`orchestration reply --id <message_id> --body "..."`. Tell Codex in the spec to use `ask`
+rather than guessing when a constraint is ambiguous — that is the real back-and-forth
+channel, and it is better than a round trip through a new node.
+
+**Write the critique to a file, not into the spec.** For page/design feedback, put the
+findings in a dated Markdown file and point every node at it as the contract. Specs cannot
+be edited after creation, so a file is the only thing you can correct between rounds. Give
+the file an explicit scope boundary naming what must NOT change — otherwise Codex will
+"helpfully" fix the most interesting problem you deliberately excluded.
 
 ## Boundaries and known constraints
-- Focus on **planning + graph building**. Execution belongs to the viewer (the coordinator).
+- Focus on **planning + graph building**. Prefer letting the viewer execute, but while the
+  submit defect above is unfixed you may have to drive `worker-start` + the Enter nudge
+  yourself. Tell the user you are doing that and why; don't silently take over.
+- **If `worker-start` exits non-zero, do not relaunch.** Read the receipt's `failedStage`
+  and `residualResources`, then load `references/recovery-and-cleanup.md` from the
+  orchestration guide. Retrying blind strands terminals and multiplies zombies.
+- **Absence is not proof.** A timeout, an empty `check`, or a missing heartbeat is a
+  checkpoint, not a failure. Only positive proof of exit (`exited` liveness, the worker's
+  own observation, or a transcript whose final turn sent no `worker_done`) authorizes
+  stop / abandon / retry.
+- **Same-file work must be serial.** Parallel workers in one worktree clobber each other.
+  Group fixes by region (JS / markup / CSS) and chain them, telling each node what the
+  previous one already did. Fan out only across genuinely separate files or worktrees.
 - **Created tasks cannot be edited**: `orca orchestration task-update` only changes `--status` / `--result`. **There is no interface to edit spec/title/deps**, and no command to delete a single task. Get the graph right on the first pass where possible.
 - **To redraw the DAG, open a new Run — never `reset`.** `orca orchestration reset --tasks` has **no `--run` scope**: it clears the entire local orchestration database, deleting other Runs' tasks too. The correct move is `run-create` a new Run and rebuild; the old Run stays as history.
 - **Decision gates are Run-scoped, but the flags differ by direction**: `gate-list` (read) takes `--run <id>`; `gate-resolve` (mutation) takes **no `--run`** — it locates the gate via `--from <handle>` (a coordinator terminal bound to the Run) plus the globally unique `--id`. That's why the viewer first binds a coordinator with `run-use`, then resolves via `--from`.
