@@ -180,7 +180,10 @@ orchestration guide is explicit that a non-zero `worker-start` must not be retri
 **Working path today — dispatch into a visible TUI and nudge it:**
 ```bash
 # 1. visible agent tab in the current worktree (this IS the "messaging window")
-orca terminal create --worktree active --title "Codex worker" --command codex --focus --json
+#    --command is a raw command: Orca does NOT add its per-agent default args here,
+#    so pass the permission flag yourself or the worker stalls on approvals / read-only.
+orca terminal create --worktree active --title "Codex worker"   --command "codex --dangerously-bypass-approvals-and-sandbox" --focus --json
+#    Claude worker instead:  --command "claude --dangerously-skip-permissions"
 orca terminal wait --terminal <term_handle> --for tui-idle --timeout-ms 120000 --json
 
 # 2. dispatch into that exact terminal instead of letting Orca spawn a structured session
@@ -213,6 +216,11 @@ of waiting.
 
 ## Back-and-forth between Claude and Codex (review/revise rounds)
 
+**Roles are not fixed.** The examples below assume Claude orchestrates and Codex implements.
+Either agent can orchestrate: read "Claude" as *the orchestrator in the chat* and "codex" as
+*the worker harness*. If Codex orchestrates, the worker is usually `claude` (launch it with
+`--dangerously-skip-permissions`), and Codex does its own review rounds in its chat.
+
 For "have Codex fix it and toss it back to me", the shape is **bounded rounds**, because a
 DAG is acyclic and cannot express a loop. Do not try to encode a cycle.
 
@@ -235,10 +243,21 @@ The orchestration guide calls this reuse-after-settlement; choose the terminal's
 *before* acking the `worker_done` delivery, and `worker-retain` it if the user wants the tab
 to stay open.
 
-**Claude's review nodes belong in conversation, not in a worker.** Running "Claude reviews
-this" as a background agent when Claude is already in the chat is pure indirection, and it
+**The orchestrator's review nodes belong in conversation, not in a worker.** Running
+"Claude reviews this" as a background agent when Claude is already in the chat is pure
+indirection, and it
 costs the user the ability to react. Do the review in chat, then
 `task-update --id <review_task> --status completed --result '{"summary":"<verdict>"}'`.
+
+**Waiting on a worker.** `orchestration check --wait` blocks until a message arrives. Claude
+can run it as a background task and be notified. An orchestrator whose shell commands time
+out (Codex) should loop shorter waits instead of one long one, and treat each empty return as
+a checkpoint, not a failure:
+```bash
+orca orchestration check --wait --types "worker_done,escalation,question" --timeout-ms 300000 --json
+```
+Between waits, `orca terminal read --terminal <worker_term> --screen --json` shows whether
+the worker is still busy.
 
 **Mid-task questions genuinely go both ways.** A dispatched worker blocks on the `ask`
 command from its injected preamble; the coordinator answers with
