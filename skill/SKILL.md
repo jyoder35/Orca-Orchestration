@@ -198,6 +198,15 @@ orca terminal read --terminal <term_handle> --screen --json
 ```
 (`--wait-submit` requires `--text`; for a bare Enter use `--enter` alone.)
 
+**Read the screen before every Enter: a dialog is not the input box.** The first time an
+agent opens in a folder it may show a trust prompt instead of its input box. Claude Code's
+"Quick safety check: Is this a project you trust?" has **"No, exit" selected by default**, so
+the Enter nudge quits Claude and the dispatch dies (seen 2026-10-01, abandoned dispatch,
+bare PowerShell left behind). After `terminal wait --for tui-idle`, run
+`terminal read --screen`; if it shows a trust or consent dialog, choose "Yes, I trust this
+folder" in the tab (by hand, or send a Down arrow then Enter) and confirm the input box is
+showing **before** `worker-start`. Pre-trusting the folder once by hand avoids it.
+
 **One Enter is sometimes not enough.** If the input box still shows `[Pasted Content]` after
 the nudge, the paste was collapsed and not sent; send `--enter` a second time. Confirm with
 `terminal read --screen` that the agent actually started working.
