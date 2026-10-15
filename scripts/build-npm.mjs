@@ -37,8 +37,18 @@ const version = (process.env.PKG_VERSION ?? rootPkg.version).replace(/^v/, "");
 
 function run(cmd, args) {
   console.log(`\n$ ${cmd} ${args.join(" ")}`);
-  execFileSync(cmd, args, { cwd: root, stdio: "inherit" });
+  // On Windows `npm` is `npm.cmd`, which execFileSync can't launch without a
+  // shell (ENOENT). Only npm gets the shell: its args are fixed literals, while
+  // esbuild's banner has spaces and quotes a shell would split.
+  execFileSync(cmd, args, { cwd: root, stdio: "inherit", shell: process.platform === "win32" && cmd === "npm" });
 }
+
+// Windows: `.bin/esbuild` is a POSIX shim and `esbuild.cmd` needs a shell, so
+// call the platform package's binary directly.
+const esbuildBin =
+  process.platform === "win32"
+    ? join(root, "node_modules", "@esbuild", `win32-${process.arch}`, "esbuild.exe")
+    : join(root, "node_modules", ".bin", "esbuild");
 
 // 1. Build the SPA ----------------------------------------------------------
 run("npm", ["run", "build", "-w", "web"]);
@@ -52,7 +62,7 @@ mkdirSync(join(out, "dist", "server"), { recursive: true });
 // `./generated/webAssets` only exists during a Bun binary build; the npm package
 // serves web/dist from disk instead, so mark it external and let the dynamic
 // import fail at runtime exactly as it does in a dev checkout.
-run(join(root, "node_modules", ".bin", "esbuild"), [
+run(esbuildBin, [
   "server/src/index.ts",
   "--bundle",
   "--platform=node",

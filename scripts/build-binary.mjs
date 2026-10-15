@@ -55,7 +55,10 @@ const MIME = {
 
 function run(cmd, args, opts = {}) {
   console.log(`\n$ ${cmd} ${args.join(" ")}`);
-  execFileSync(cmd, args, { cwd: root, stdio: "inherit", ...opts });
+  // On Windows `npm` is `npm.cmd`, which execFileSync can't launch without a
+  // shell (ENOENT). Only npm gets the shell: its args are fixed literals, while
+  // bun's --outfile is a path that may contain spaces.
+  execFileSync(cmd, args, { cwd: root, stdio: "inherit", shell: process.platform === "win32" && cmd === "npm", ...opts });
 }
 
 function walk(dir) {

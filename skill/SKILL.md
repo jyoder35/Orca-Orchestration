@@ -100,6 +100,11 @@ Every subtask's `--spec` must be **self-contained and independently executable**
 - **Outputs**: which files to create/modify, what the deliverable is.
 - **Acceptance criteria**: what "done" means (runnable tests, observable behavior).
 - Use imperative sentences; avoid vague phrasing like "investigate" or "as appropriate".
+- **Side effects outside the files**: if a change reaches anything external (a webhook
+  payload, a CRM field mapping, legal or compliance text, a shared check script), name it in
+  the brief and get the user's decision before firing. Don't leave it for a worker to
+  discover. Adding a "last name" form field changed what a lead webhook sent; the CRM
+  workflow had to map the new key, or the value would have been silently dropped.
 
 ## When human approval is needed
 
@@ -121,6 +126,13 @@ Once the DAG has taken shape, ask the user to open the viewer, and **tell them t
 npx orca-dag    # run in the current project directory; serves http://localhost:8787 and opens the browser
 ```
 (If they already have it running — likely, since that command is also what installed this skill — they just need to reselect the Run.)
+
+**The viewer only lives while its terminal does.** `Failed to fetch`, or localhost:8787 not
+reachable, means the process is gone (usually because its tab was closed). Start it again
+in a tab the user keeps open. **If you are driving the workers yourself** (see the defect
+section below), the viewer is watch-only: tell the user **not** to click "▶ Run with Orca"
+on that Run. Starting it runs `run-use` for the viewer, which fences you and revokes every
+live worker's capability (see the 🛑 note below).
 In the viewer the user will: **pick your new Run in the top bar** → **watch the DAG live** → **choose a harness per node** (claude / codex / opencode / grok …, or a default fallback) → click **"▶ Run with Orca"** → **the viewer uses `worker-start` to spin up workers in dependency-parallel, waits for `worker_done`, and advances the whole graph** → **resolve approval gates**.
 
 In other words: **execution is the viewer's job, not yours.** Your responsibility ends at "the DAG is correct".
@@ -279,6 +291,49 @@ findings in a dated Markdown file and point every node at it as the contract. Sp
 be edited after creation, so a file is the only thing you can correct between rounds. Give
 the file an explicit scope boundary naming what must NOT change — otherwise Codex will
 "helpfully" fix the most interesting problem you deliberately excluded.
+
+**Make the boundary machine-checkable.** Workers break prose "do not touch" lists. Where you
+can, back the boundary with a small check script (IDs that must exist, verbatim legal text,
+untouched tracking and payload keys) and run it yourself after every round. Revert a round
+that fails; don't patch forward. A 32-check script kept a landing page's tracking, webhook
+payload and legal copy intact through six rounds by two agents (2026-10-01).
+
+**Before round 1, make sure the verification tools show the thing under review.** A
+screenshot script stopped above the contact form both reviewers were asked to cut, so each
+wrote its own capture workaround. Fix the tool once, up front. Then require every visual
+claim in a round entry to cite a screenshot or a measurement. Codex caught a "fits on one
+line" claim that the phone crop showed as two lines.
+
+**Give rounds a fixed log format in the contract file.** Each round appends:
+- **critique of the previous round**: adversarial (what got worse, what is still unclear),
+  pushing back with reasons;
+- **changes made**, each tied to a critique point;
+- **deliberately not changed**, and why;
+- the **check-script result**.
+
+The last round ends with **open disagreements for the user**, so neither reviewer wins
+quietly. This format is what made the reviewers catch each other: Codex rewrote an approved
+headline to fit a product name in, and Claude restored it in the next round.
+
+**Copy the user's words exactly, and record reversals.** The orchestrator added a period
+when it copied the user's byline into the contract, and the reviewers spent two rounds
+removing and restoring it. Quote requirements verbatim. When reviewers dispute the contract
+itself, ask the user and fix the file; don't let rounds argue it out. When new feedback
+reverses an earlier contract item, write the reversal into the file ("this reverses item 4;
+the user's call") so a later round doesn't bring the old rule back.
+
+## Ending a Run
+- Mark leftover nodes `completed` with a result that says why (e.g. "not needed, R2
+  accepted"), so the graph reads as finished.
+- **Tell the user which tabs to close**, by title: the coordinator terminal, finished worker
+  tabs, and any bare shell left by a dead dispatch. Close the ones you created once their
+  dispatches have settled. Tabs pile up fast across Runs (one 2026-10-01 session had eight
+  open, including a coordinator from an earlier Run), and a stale coordinator makes it
+  unclear which Run is live.
+- **Write a handoff note into the contract file**: the Run id and whether it finished, which
+  terminals can be closed, launch flags that turned out to be needed, and any user feedback
+  not yet applied. The next orchestrator may be a different agent (Codex or Cursor) with no
+  memory of this chat, and the file is the only thing it will read.
 
 ## Boundaries and known constraints
 - Focus on **planning + graph building**. Prefer letting the viewer execute, but while the
